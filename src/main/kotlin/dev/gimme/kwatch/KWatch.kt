@@ -1,16 +1,19 @@
+@file:JvmName("KWatch")
+
 package dev.gimme.kwatch
 
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.nio.file.Path
-import java.nio.file.attribute.FileTime
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.io.path.absolute
 import kotlin.io.path.exists
-import kotlin.io.path.getLastModifiedTime
-
-// TODO: API (documentation/naming)
-// TODO: Document: cancelled on thread close
 
 /**
- * Watches for changes in the directory representing this path.
+ * Listens for changes in the directory represented by this path.
  *
  * [onEvent] gets called every time there is an event. The call happens after a delay of [delayMillis] ms and collects
  * all events within that time window into one. If set to 0, all events get sent separately.
@@ -21,15 +24,28 @@ import kotlin.io.path.getLastModifiedTime
  * If [recursive] is set to true, events in subdirectories are also included (and their subdirectories etc.).
  *
  * Uses [java.nio.file.WatchService] under the hood to catch the events.
+ *
+ * @return an interface to cancel the listener
  */
-suspend fun Path.watch(
+fun Path.watch(
     recursive: Boolean = true,
     delayMillis: Long = 50,
-    onEvent: suspend (Event) -> Unit,
-): Unit = KWatcher(path = this, recursive = recursive, delayMillis = delayMillis, onEvent = onEvent).run { start() }
+    context: CoroutineContext = EmptyCoroutineContext,
+    onEvent: (Event) -> Unit,
+): Cancellable {
+    val watcher = DirectoryWatcher(path = this, recursive = recursive, delayMillis = delayMillis, onEvent = onEvent)
+
+    val scope = CoroutineScope(CoroutineName("kwatch-watcher") + context)
+
+    scope.launch {
+        watcher.start()
+    }
+
+    return Cancellable { scope.cancel() }
+}
 
 /**
- * Watches for changes on the file representing this path.
+ * Listens for changes on the file represented by this path.
  *
  * The [block] gets called every time the content of the file is modified or the file is recreated. The call happens
  * after a delay of [delayMillis] ms to avoid multiple calls in quick succession.
@@ -39,47 +55,30 @@ suspend fun Path.watch(
  * Throws [IllegalArgumentException] if the parent directory does not exist, and if the parent directory is deleted
  * later, no further file changes will be seen.
  *
- * [lastModified] can be used to decide if the [block] should be called once at the start. There are three options:
- *
- * | Value    | Block called at start |
- * | -------- | --------------------- |
- * | Default  | Never                 |
- * | null     | Always                |
- * | Provided | If modified since     |
+ * @return an interface to cancel the listener
  */
-suspend fun Path.onChange(
-    lastModified: FileTime? = lastModifiedOrNull,
+@JvmOverloads
+fun Path.onChange(
     delayMillis: Long = 50,
-    block: suspend () -> Unit,
-) {
+    context: CoroutineContext = EmptyCoroutineContext,
+    block: () -> Unit,
+): Cancellable {
     val parent: Path? = this.absolute().parent
     require(parent != null && parent.exists()) { "Parent directory does not exist" }
 
-    parent.watch(recursive = false, delayMillis = delayMillis) { event ->
+    return parent.watch(recursive = false, delayMillis = delayMillis, context = context) { event ->
         if (!exists()) return@watch
 
-        val fileChanged = event.path.equalsAbsolute(this) &&
+        val fileChanged = equalsReal(event.path) &&
                 event.actions.any { it in setOf(Event.Action.CREATE, Event.Action.MODIFY) }
-        val modifiedBeforeInit = { event.initialization && this.isModifiedSince(lastModified) }
 
-        if (fileChanged || modifiedBeforeInit()) {
+        if (fileChanged) {
             block.invoke()
         }
     }
 }
 
 /**
- * Returns if the absolute paths of this and the [other] path are equal.
+ * Returns if the real paths of this and the [other] path are equal.
  */
-private fun Path.equalsAbsolute(other: Path) = this.absolute() == other.absolute()
-
-/**
- * Returns if the file located by this path has been modified since [lastModified], or if it doesn't exist,
- * returns true if [lastModified] is null.
- */
-private fun Path.isModifiedSince(lastModified: FileTime?) = lastModifiedOrNull != lastModified
-
-/**
- * Returns the last modified time of the file located by this path if it exists.
- */
-private val Path.lastModifiedOrNull: FileTime? get() = if (exists()) getLastModifiedTime() else null
+private fun Path.equalsReal(other: Path) = this.toRealPath() == other.toRealPath()

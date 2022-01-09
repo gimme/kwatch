@@ -20,14 +20,24 @@ import kotlin.io.path.absolute
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
 
-internal class KWatcher(
+/**
+ * Watches for changes in the directory represented by the [path]. Starts watching for events immediately, and after
+ * [start] has been called, [onEvent] continuously gets called for each event seen by this watcher.
+ */
+internal class DirectoryWatcher(
     path: Path,
+    /**
+     * If events from subdirectories (and their subdirectories etc.) should be included.
+     */
     private val recursive: Boolean = true,
     /**
-     * Avoids multiple events being fired in quick succession by collecting them during a period.
-     * TODO: https://stackoverflow.com/questions/16777869/java-7-watchservice-ignoring-multiple-occurrences-of-the-same-event
+     * Delay in milliseconds after getting an event to wait for more events before sending them. This is useful to avoid
+     * having [onEvent] called multiple times in quick succession when multiple events are spawned from "one change".
      */
     private val delayMillis: Long = 50,
+    /**
+     * The function to be called on each event.
+     */
     private val onEvent: suspend (Event) -> Unit,
 ) {
 
@@ -41,14 +51,15 @@ internal class KWatcher(
     private val watchService: WatchService = path.fileSystem.newWatchService()
     private val watchKeys = mutableListOf<WatchKey>()
 
+    init {
+        updateWatchKeys()
+    }
+
     /**
-     * Starts watching TODO
+     * Starts calling [onEvent] based on events seen by this watcher.
      */
     suspend fun start() = withContext(EmptyCoroutineContext) {
         coroutineContext.job.invokeOnCompletion { watchService.close() }
-        updateWatchKeys()
-
-        onEvent(Event(path, setOf(Event.Action.INIT)))
 
         var structureModified = false
 
@@ -95,24 +106,30 @@ internal class KWatcher(
     /**
      * Updates the watch key registrations to match the current folder structure of the watched [path].
      */
-    private suspend fun updateWatchKeys() {
-        watchKeys.forEach { it.cancel() }
-        watchKeys.clear()
+    private fun updateWatchKeys() {
+        val paths = mutableSetOf<Path>()
 
-        if (recursive) runInterruptible(Dispatchers.IO) {
+        if (recursive) {
             Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
                 override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    watchKeys += dir.register()
+                    paths.add(dir)
                     return FileVisitResult.CONTINUE
                 }
             })
         } else {
-            watchKeys += path.register()
+            paths.add(path)
         }
+
+        val currentWatchPaths = watchKeys.map { key -> key.watchable() }.toSet()
+        val oldKeys = watchKeys.filter { it.watchable() !in paths }.onEach { it.cancel() }
+        val newKeys = paths.filter { it !in currentWatchPaths }.map { it.register() }
+
+        watchKeys.removeAll(oldKeys)
+        watchKeys.addAll(newKeys)
     }
 
     /**
-     * Registers this path with the [watchService].
+     * Registers this path with the [watchService] and returns the generated watch key.
      */
     private fun Path.register() = register(watchService, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY)
 }

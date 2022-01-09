@@ -21,7 +21,6 @@ data class Event(
      * A type of action done to a file/directory.
      */
     enum class Action {
-        INIT,
         CREATE,
         DELETE,
         MODIFY,
@@ -32,9 +31,4 @@ data class Event(
      */
     internal val modifiedStructure =
         path.isDirectory() && actions.any { it in setOf(Action.CREATE, Action.DELETE) }
-
-    /**
-     * If this is the initialization event.
-     */
-    internal val initialization = actions.contains(Action.INIT)
 }
